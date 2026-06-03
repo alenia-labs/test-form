@@ -1,0 +1,14 @@
+course
+<invoke name="create_file">
+<parameter name="description">Cloudflare Workers静的アセット用の最小wrangler設定</parameter>
+<parameter name="path">/mnt/user-data/outputs/wrangler.jsonc</parameter>
+<parameter name="file_text">{
+// 好きなプロジェクト名でOK（英数字とハイフン）
+“name”: “store-check”,
+“compatibility_date”: “2026-06-03”,
+// index.html が置いてある場所。リポジトリ直下なら “./”
+“assets”: {
+“directory”: “./”
+}
+}
+</parameter>
