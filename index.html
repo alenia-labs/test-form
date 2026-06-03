@@ -12,9 +12,9 @@
 </style>
 
 <!-- React -->
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
 
 <!-- Firebase (compat / グローバル firebase が使える) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
@@ -23,6 +23,30 @@
 </head>
 <body>
 <div id="root"><div class="boot">起動中…</div></div>
+
+<!-- 画面にエラーを出して原因を分かるようにする -->
+<script>
+  function showErr(msg){
+    var r=document.getElementById('root');
+    if(!r) return;
+    r.innerHTML='<div style="padding:26px;font-family:sans-serif;color:#fff;background:#7a1f1f;height:100%;overflow:auto;font-size:14px;line-height:1.8;box-sizing:border-box">'
+      +'<b style="font-size:16px">⚠ 起動できませんでした</b><br><br>'+msg
+      +'<br><br><span style="opacity:.8">↑ このメッセージをそのままコピーして共有してください。</span></div>';
+  }
+  window.addEventListener('error', function(e){
+    if(e.target && (e.target.src||e.target.href)){
+      showErr('ファイルの読み込みに失敗しました：<br>'+(e.target.src||e.target.href)+'<br><br>ネット接続か、読み込みがブロックされていないか確認してください。');
+    } else {
+      showErr((e.message||String(e.error)));
+    }
+  }, true);
+  // 8秒たっても起動中のままなら、読み込み失敗の可能性を知らせる
+  setTimeout(function(){
+    if(document.querySelector('#root .boot')){
+      showErr('読み込みに時間がかかっています。回線を変える・ページを再読み込みしてみてください。それでも変わらなければ React / Babel の読み込みがブロックされている可能性があります。');
+    }
+  }, 8000);
+</script>
 
 <!-- ===================================================================== -->
 <!--  ① ここに Firebase の設定を貼り付けてください                          -->
@@ -55,11 +79,16 @@ const { useState, useEffect, useCallback } = React;
 /*  データ層：Firestore（未設定ならローカル保存にフォールバック）        */
 /* ------------------------------------------------------------------ */
 const configured = FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "ここに貼る";
-let db = null, auth = null;
+let db = null, auth = null, initError = null;
 if (configured) {
-  firebase.initializeApp(FIREBASE_CONFIG);
-  db = firebase.firestore();
-  auth = firebase.auth();
+  try {
+    if (typeof firebase === "undefined") throw new Error("Firebase本体が読み込めていません（gstaticへの接続を確認）");
+    firebase.initializeApp(FIREBASE_CONFIG);
+    db = firebase.firestore();
+    auth = firebase.auth();
+  } catch (e) {
+    initError = "Firebaseの初期化に失敗：" + (e.message || e);
+  }
 }
 const storeRef = () => db.collection("stores").doc(STORE_ID);
 const recCol   = () => storeRef().collection("records");
@@ -99,26 +128,38 @@ function App(){
   const [staff,setStaff]=useState("");
   const [note,setNote]=useState("");
   const [toast,setToast]=useState(null);
+  const [err,setErr]=useState(initError);
   const t=THEMES[mode];
 
   /* ---- 初期化：認証＋リアルタイム購読 ---- */
   useEffect(()=>{
+    if(initError) return;
     if(!configured){
       const c=LS.cfg(); if(c&&c.open&&c.close) setConfig(c);
       setRecords(LS.recs()); setLoaded(true); return;
     }
     let unsubCfg=()=>{}, unsubRec=()=>{};
-    auth.signInAnonymously().catch(e=>console.error(e));
+    auth.signInAnonymously().catch(e=>{
+      setErr("ログインに失敗："+(e.code||e.message)+
+        (String(e.code).indexOf("operation-not-allowed")>=0
+          ? "<br><br>Firebase の Authentication で「Anonymous（匿名）」が有効になっているか確認してください。" : ""));
+      setLoaded(true);
+    });
     const ready=auth.onAuthStateChanged(u=>{
       if(!u) return;
       unsubCfg=storeRef().onSnapshot(snap=>{
         if(snap.exists){ const d=snap.data(); if(d.open&&d.close) setConfig(d); }
-        else { storeRef().set(DEFAULT_CONFIG); }
+        else { storeRef().set(DEFAULT_CONFIG).catch(e=>setErr("書き込み失敗："+(e.code||e.message))); }
         setLoaded(true);
-      },err=>{console.error(err);setLoaded(true);});
+      },e=>{
+        setErr("データ読み込み失敗："+(e.code||e.message)+
+          (String(e.code).indexOf("permission-denied")>=0
+            ? "<br><br>Firestore のルールを確認してください（匿名ログイン済みユーザーに read/write 許可が必要）。" : ""));
+        setLoaded(true);
+      });
       unsubRec=recCol().orderBy("ts","desc").limit(200).onSnapshot(snap=>{
         setRecords(snap.docs.map(d=>({id:d.id,...d.data()})));
-      },err=>console.error(err));
+      },e=>console.error(e));
     });
     return ()=>{ready();unsubCfg();unsubRec();};
   },[]);
@@ -148,6 +189,7 @@ function App(){
   };
 
   if(!configured) return <SetupScreen/>;
+  if(err) return <ErrScreen msg={err}/>;
 
   if(!loaded) return (
     <div style={{...wrap,background:t.bg,color:t.ink,alignItems:"center",justifyContent:"center"}}>
@@ -290,6 +332,20 @@ function EditView({t,config,saveConfig,flash}){
       </div>
       <button onClick={add} style={{marginTop:12,width:"100%",border:`2px dashed ${t.line}`,cursor:"pointer",background:"transparent",color:t.accent,padding:"14px 0",borderRadius:14,fontFamily:"'Zen Maru Gothic',sans-serif",fontWeight:700,fontSize:15}}>＋ 項目を追加</button>
       <div style={{marginTop:14,fontSize:12,color:t.sub,fontFamily:"'Zen Maru Gothic',sans-serif",textAlign:"center"}}>変更は自動で保存され、全員の画面に反映されます</div>
+    </div>
+  );
+}
+
+function ErrScreen({msg}){
+  const t=THEMES.close;
+  return(
+    <div style={{...wrap,background:"#5e1717",color:"#fff",padding:"32px 24px",justifyContent:"center"}}>
+      <style>{FONT_CSS}</style>
+      <div style={{fontFamily:"'Zen Maru Gothic',sans-serif"}}>
+        <div style={{fontSize:24,fontWeight:900,marginBottom:16}}>⚠ うまく起動できません</div>
+        <p style={{lineHeight:1.9,fontSize:15}} dangerouslySetInnerHTML={{__html:msg}}/>
+        <p style={{lineHeight:1.8,fontSize:13,opacity:.8,marginTop:18}}>↑ この内容をそのままコピーして共有してください。</p>
+      </div>
     </div>
   );
 }
