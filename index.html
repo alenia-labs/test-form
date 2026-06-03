@@ -64,6 +64,8 @@
 
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback } = React;
+const FIREBASE_CONFIG = window.FIREBASE_CONFIG || {};
+const STORE_ID = window.STORE_ID || "main";
 
 /* ------------------------------------------------------------------ */
 /*  データ層：Firestore（未設定ならローカル保存にフォールバック）        */
