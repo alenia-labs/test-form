@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#ef9a4e" />
+<title>店舗 開店・閉店チェック</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#161c3a;}
+  #root{height:100%;}
+  .boot{height:100%;display:flex;align-items:center;justify-content:center;color:#9aa6d8;font-family:sans-serif;}
+</style>
+
+<!-- React -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Firebase (compat / グローバル firebase が使える) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body>
+<div id="root"><div class="boot">起動中…</div></div>
+
+<!-- ===================================================================== -->
+<!--  ① ここに Firebase の設定を貼り付けてください                          -->
+<!--     Firebaseコンソール → プロジェクト設定 → マイアプリ(</>) からコピー  -->
+<!-- ===================================================================== -->
+<script>
+  const FIREBASE_CONFIG = {
+    apiKey: "ここに貼る",
+    authDomain: "ここに貼る",
+    projectId: "ここに貼る",
+    storageBucket: "ここに貼る",
+    messagingSenderId: "ここに貼る",
+    appId: "ここに貼る"
+  };
+  const STORE_ID = "main"; // 店舗が複数なら "shibuya" など変えてコピーを増やす
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+/* ------------------------------------------------------------------ */
+/*  データ層：Firestore（未設定ならローカル保存にフォールバック）        */
+/* ------------------------------------------------------------------ */
+const configured = FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "ここに貼る";
+let db = null, auth = null;
+if (configured) {
+  firebase.initializeApp(FIREBASE_CONFIG);
+  db = firebase.firestore();
+  auth = firebase.auth();
+}
+const storeRef = () => db.collection("stores").doc(STORE_ID);
+const recCol   = () => storeRef().collection("records");
+
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+const DEFAULT_CONFIG = {
+  storeName: "わたしのお店",
+  open: ["鍵を開ける・防犯アラーム解除","照明・看板の電源を入れる","空調（エアコン）を入れる","レジの釣銭確認・起動","トイレの清掃チェック","食材・在庫の確認","厨房機器の電源・温度確認","テーブル・備品のセット"].map(t=>({id:uid(),text:t})),
+  close:["レジ締め・売上を記録","厨房機器の電源OFF","火元・ガスの元栓確認","ゴミ出し","床・テーブル・トイレ清掃","在庫・翌日の発注メモ","照明・看板の電源OFF","戸締まり・防犯アラームセット"].map(t=>({id:uid(),text:t})),
+};
+
+/* ローカル保存フォールバック（Firebase未設定時のみ） */
+const LS = {
+  cfg(){ try{return JSON.parse(localStorage.getItem("sc-cfg"))}catch(e){return null} },
+  setCfg(c){ try{localStorage.setItem("sc-cfg",JSON.stringify(c))}catch(e){} },
+  recs(){ try{return JSON.parse(localStorage.getItem("sc-rec"))||[]}catch(e){return []} },
+  setRecs(r){ try{localStorage.setItem("sc-rec",JSON.stringify(r))}catch(e){} },
+};
+
+/* ------------------------------------------------------------------ */
+const THEMES = {
+  open:{name:"開店",icon:"☀",bg:"radial-gradient(120% 90% at 50% -10%, #ffe9c2 0%, #ffd79a 30%, #f7b56b 70%, #ef9a4e 100%)",ink:"#4a2d12",sub:"#8a5a2c",accent:"#e2702a",card:"rgba(255,251,243,0.92)",line:"rgba(120,70,20,0.14)",done:"#1f9d57",doneBg:"rgba(31,157,87,0.12)",ring:"#e2702a",shadow:"0 10px 30px rgba(180,100,30,0.25)"},
+  close:{name:"閉店",icon:"☾",bg:"radial-gradient(120% 90% at 50% -10%, #2a3566 0%, #1f284f 35%, #161c3a 75%, #0f132a 100%)",ink:"#eef1ff",sub:"#9aa6d8",accent:"#7d8cff",card:"rgba(34,42,78,0.85)",line:"rgba(255,255,255,0.10)",done:"#4ad991",doneBg:"rgba(74,217,145,0.14)",ring:"#8a96ff",shadow:"0 10px 30px rgba(0,0,0,0.45)"},
+};
+const FONT_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap');`;
+
+function App(){
+  const [loaded,setLoaded]=useState(false);
+  const [config,setConfig]=useState(DEFAULT_CONFIG);
+  const [records,setRecords]=useState([]);
+  const [mode,setMode]=useState("open");
+  const [view,setView]=useState("check");
+  const [checked,setChecked]=useState({});
+  const [staff,setStaff]=useState("");
+  const [note,setNote]=useState("");
+  const [toast,setToast]=useState(null);
+  const t=THEMES[mode];
+
+  /* ---- 初期化：認証＋リアルタイム購読 ---- */
+  useEffect(()=>{
+    if(!configured){
+      const c=LS.cfg(); if(c&&c.open&&c.close) setConfig(c);
+      setRecords(LS.recs()); setLoaded(true); return;
+    }
+    let unsubCfg=()=>{}, unsubRec=()=>{};
+    auth.signInAnonymously().catch(e=>console.error(e));
+    const ready=auth.onAuthStateChanged(u=>{
+      if(!u) return;
+      unsubCfg=storeRef().onSnapshot(snap=>{
+        if(snap.exists){ const d=snap.data(); if(d.open&&d.close) setConfig(d); }
+        else { storeRef().set(DEFAULT_CONFIG); }
+        setLoaded(true);
+      },err=>{console.error(err);setLoaded(true);});
+      unsubRec=recCol().orderBy("ts","desc").limit(200).onSnapshot(snap=>{
+        setRecords(snap.docs.map(d=>({id:d.id,...d.data()})));
+      },err=>console.error(err));
+    });
+    return ()=>{ready();unsubCfg();unsubRec();};
+  },[]);
+
+  const saveConfig=useCallback(async(next)=>{
+    setConfig(next);
+    if(configured) await storeRef().set(next,{merge:true});
+    else LS.setCfg(next);
+  },[]);
+
+  const items=config[mode];
+  const doneCount=items.filter(it=>checked[it.id]).length;
+  const total=items.length;
+  const pct=total?Math.round(doneCount/total*100):0;
+
+  const flash=(m)=>{setToast(m);setTimeout(()=>setToast(null),2200);};
+  const toggle=(id)=>setChecked(c=>({...c,[id]:!c[id]}));
+  const switchMode=(m)=>{setMode(m);setChecked({});setNote("");setView("check");};
+
+  const submit=async()=>{
+    if(!staff.trim()){flash("担当者名を入力してください");return;}
+    const rec={mode,modeName:t.name,staff:staff.trim(),note:note.trim(),ts:Date.now(),
+      done:doneCount,total,items:items.map(it=>({text:it.text,ok:!!checked[it.id]}))};
+    if(configured){ await recCol().add(rec); }
+    else { const n=[{id:uid(),...rec},...records].slice(0,200); setRecords(n); LS.setRecs(n); }
+    setChecked({});setNote("");flash(`${t.name}チェックを記録しました ✓`);setView("history");
+  };
+
+  if(!configured) return <SetupScreen/>;
+
+  if(!loaded) return (
+    <div style={{...wrap,background:t.bg,color:t.ink,alignItems:"center",justifyContent:"center"}}>
+      <style>{FONT_CSS}</style>
+      <div style={{fontFamily:"'Zen Maru Gothic',sans-serif",opacity:.7}}>読み込み中…</div>
+    </div>
+  );
+
+  return (
+    <div style={{...wrap,background:t.bg,color:t.ink,transition:"background .5s ease,color .3s"}}>
+      <style>{FONT_CSS}{`
+        *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
+        .sc-fade{animation:scfade .4s ease both}@keyframes scfade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+        .sc-pop{animation:scpop .25s ease both}@keyframes scpop{from{transform:scale(.96);opacity:.5}to{transform:scale(1);opacity:1}}
+        input,textarea{font-family:'Zen Maru Gothic',sans-serif}::placeholder{color:currentColor;opacity:.4}
+      `}</style>
+
+      <div style={{padding:"max(18px,env(safe-area-inset-top)) 20px 8px"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{fontFamily:"'Zen Maru Gothic',sans-serif",fontWeight:700,fontSize:17}}>{config.storeName}</div>
+          <div style={{fontFamily:"'Outfit',sans-serif",fontSize:12,opacity:.7}}>
+            {new Date().toLocaleDateString("ja-JP",{month:"long",day:"numeric",weekday:"short"})}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8,marginTop:14,background:t.line,padding:5,borderRadius:16}}>
+          {["open","close"].map(m=>{const a=mode===m,th=THEMES[m];return(
+            <button key={m} onClick={()=>switchMode(m)} style={{flex:1,border:"none",cursor:"pointer",padding:"12px 0",borderRadius:12,fontFamily:"'Zen Maru Gothic',sans-serif",fontWeight:700,fontSize:16,background:a?t.card:"transparent",color:a?t.ink:t.sub,boxShadow:a?t.shadow:"none",transition:"all .25s"}}>
+              <span style={{marginRight:6}}>{th.icon}</span>{th.name}チェック
+            </button>);})}
+        </div>
+      </div>
+
+      <div style={{flex:1,overflowY:"auto",padding:"8px 20px 120px"}}>
+        {view==="check"&&<CheckView key={mode} t={t} items={items} checked={checked} toggle={toggle} pct={pct} doneCount={doneCount} total={total} staff={staff} setStaff={setStaff} note={note} setNote={setNote} onSubmit={submit}/>}
+        {view==="history"&&<HistoryView t={t} records={records}/>}
+        {view==="edit"&&<EditView t={t} config={config} saveConfig={saveConfig} flash={flash}/>}
+      </div>
+
+      {toast&&<div className="sc-pop" style={{position:"fixed",left:"50%",bottom:96,transform:"translateX(-50%)",background:t.ink,color:t.card,padding:"12px 20px",borderRadius:30,fontFamily:"'Zen Maru Gothic',sans-serif",fontWeight:700,fontSize:14,boxShadow:t.shadow,zIndex:50,maxWidth:"90%",textAlign:"center"}}>{toast}</div>}
+
+      <div style={{position:"fixed",left:0,right:0,bottom:0,background:t.card,borderTop:`1px solid ${t.line}`,display:"flex",padding:"8px 12px max(14px,env(safe-area-inset-bottom))",backdropFilter:"blur(10px)",zIndex:40}}>
+        {[{k:"check",label:"チェック",icon:"✓"},{k:"history",label:"記録",icon:"≣"},{k:"edit",label:"項目編集",icon:"✎"}].map(n=>{const a=view===n.k;return(
+          <button key={n.k} onClick={()=>setView(n.k)} style={{flex:1,background:"none",border:"none",cursor:"pointer",color:a?t.accent:t.sub,fontFamily:"'Zen Maru Gothic',sans-serif",display:"flex",flexDirection:"column",alignItems:"center",gap:3,fontWeight:a?700:500}}>
+            <span style={{fontSize:20}}>{n.icon}</span><span style={{fontSize:11}}>{n.label}</span>
+          </button>);})}
+      </div>
+    </div>
+  );
+}
+
+function CheckView({t,items,checked,toggle,pct,doneCount,total,staff,setStaff,note,setNote,onSubmit}){
+  const R=52,C=2*Math.PI*R;
+  return(
+    <div className="sc-fade">
+      <div style={{display:"flex",alignItems:"center",gap:18,padding:"14px 4px 18px"}}>
+        <svg width="120" height="120" viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r={R} fill="none" stroke={t.line} strokeWidth="12"/>
+          <circle cx="60" cy="60" r={R} fill="none" stroke={t.ring} strokeWidth="12" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={C-C*pct/100} transform="rotate(-90 60 60)" style={{transition:"stroke-dashoffset .5s ease"}}/>
+          <text x="60" y="56" textAnchor="middle" fontFamily="Outfit,sans-serif" fontWeight="800" fontSize="30" fill={t.ink}>{pct}%</text>
+          <text x="60" y="78" textAnchor="middle" fontFamily="Outfit,sans-serif" fontSize="13" fill={t.sub}>{doneCount}/{total}</text>
+        </svg>
+        <div style={{fontFamily:"'Zen Maru Gothic',sans-serif"}}>
+          <div style={{fontSize:22,fontWeight:900}}>{t.icon} {t.name}作業</div>
+          <div style={{fontSize:13,color:t.sub,marginTop:6,lineHeight:1.6}}>{doneCount===total?"すべて完了！記録できます":"終わった項目をタップ"}</div>
+        </div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {items.map((it,i)=>{const on=!!checked[it.id];return(
+          <button key={it.id} onClick={()=>toggle(it.id)} style={{display:"flex",alignItems:"center",gap:14,textAlign:"left",background:on?t.doneBg:t.card,border:`1px solid ${on?t.done:t.line}`,borderRadius:16,padding:"16px",cursor:"pointer",width:"100%",fontFamily:"'Zen Maru Gothic',sans-serif",color:t.ink,transition:"all .18s",boxShadow:on?"none":t.shadow}}>
+            <span style={{width:28,height:28,borderRadius:9,flexShrink:0,border:`2px solid ${on?t.done:t.sub}`,background:on?t.done:"transparent",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900,transition:"all .18s"}}>{on?"✓":""}</span>
+            <span style={{fontSize:16,fontWeight:500,flex:1,textDecoration:on?"line-through":"none",opacity:on?.55:1}}>{it.text}</span>
+            <span style={{fontFamily:"Outfit,sans-serif",fontSize:13,color:t.sub}}>{i+1}</span>
+          </button>);})}
+      </div>
+      <div style={{marginTop:22,background:t.card,borderRadius:16,padding:16,border:`1px solid ${t.line}`,boxShadow:t.shadow}}>
+        <label style={lbl(t)}>担当者</label>
+        <input value={staff} onChange={e=>setStaff(e.target.value)} placeholder="名前を入力" style={inp(t)}/>
+        <label style={{...lbl(t),marginTop:14}}>申し送り・メモ（任意）</label>
+        <textarea value={note} onChange={e=>setNote(e.target.value)} rows={2} placeholder="次の人への連絡事項など" style={{...inp(t),resize:"none"}}/>
+      </div>
+      <button onClick={onSubmit} style={{marginTop:16,width:"100%",border:"none",cursor:"pointer",background:t.accent,color:"#fff",padding:"18px 0",borderRadius:16,fontFamily:"'Zen Maru Gothic',sans-serif",fontWeight:900,fontSize:17,boxShadow:t.shadow,letterSpacing:".03em"}}>{t.name}チェックを記録する</button>
+    </div>
+  );
+}
+
+function HistoryView({t,records}){
+  const [openId,setOpenId]=useState(null);
+  if(!records.length) return(<div className="sc-fade" style={{textAlign:"center",padding:"60px 20px",color:t.sub,fontFamily:"'Zen Maru Gothic',sans-serif"}}><div style={{fontSize:40,marginBottom:12}}>≣</div>まだ記録がありません</div>);
+  return(
+    <div className="sc-fade" style={{display:"flex",flexDirection:"column",gap:10,paddingTop:10}}>
+      {records.map(r=>{const exp=openId===r.id,d=new Date(r.ts),full=r.done===r.total;return(
+        <div key={r.id} style={{background:t.card,borderRadius:16,border:`1px solid ${t.line}`,overflow:"hidden",boxShadow:t.shadow}}>
+          <button onClick={()=>setOpenId(exp?null:r.id)} style={{width:"100%",border:"none",background:"none",cursor:"pointer",padding:16,display:"flex",alignItems:"center",gap:12,textAlign:"left",fontFamily:"'Zen Maru Gothic',sans-serif",color:t.ink}}>
+            <span style={{fontSize:22}}>{r.mode==="open"?"☀":"☾"}</span>
+            <div style={{flex:1}}>
+              <div style={{fontWeight:700,fontSize:15}}>{r.modeName}　<span style={{color:t.sub,fontWeight:500,fontSize:13}}>{r.staff}</span></div>
+              <div style={{fontSize:12,color:t.sub,fontFamily:"Outfit,sans-serif",marginTop:2}}>{d.toLocaleDateString("ja-JP",{month:"numeric",day:"numeric"})}　{d.toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})}</div>
+            </div>
+            <span style={{fontSize:12,fontWeight:700,padding:"4px 10px",borderRadius:20,background:full?t.doneBg:t.line,color:full?t.done:t.sub,fontFamily:"Outfit,sans-serif"}}>{r.done}/{r.total}</span>
+          </button>
+          {exp&&<div className="sc-pop" style={{padding:"0 16px 16px",borderTop:`1px solid ${t.line}`}}>
+            <div style={{paddingTop:12,display:"flex",flexDirection:"column",gap:6}}>
+              {r.items.map((it,i)=>(<div key={i} style={{display:"flex",gap:8,fontSize:14,fontFamily:"'Zen Maru Gothic',sans-serif",color:it.ok?t.ink:t.sub}}><span style={{color:it.ok?t.done:t.sub}}>{it.ok?"✓":"—"}</span><span style={{textDecoration:it.ok?"none":"line-through",opacity:it.ok?1:.6}}>{it.text}</span></div>))}
+            </div>
+            {r.note&&<div style={{marginTop:12,padding:12,background:t.line,borderRadius:10,fontSize:13,fontFamily:"'Zen Maru Gothic',sans-serif",lineHeight:1.6}}>📝 {r.note}</div>}
+          </div>}
+        </div>);})}
+    </div>
+  );
+}
+
+function EditView({t,config,saveConfig,flash}){
+  const [name,setName]=useState(config.storeName);
+  const [tab,setTab]=useState("open");
+  useEffect(()=>setName(config.storeName),[config.storeName]);
+  const list=config[tab];
+  const update=(next)=>saveConfig({...config,[tab]:next});
+  const editText=(id,text)=>update(list.map(x=>x.id===id?{...x,text}:x));
+  const remove=(id)=>update(list.filter(x=>x.id!==id));
+  const move=(idx,dir)=>{const j=idx+dir;if(j<0||j>=list.length)return;const n=[...list];[n[idx],n[j]]=[n[j],n[idx]];update(n);};
+  const add=()=>update([...list,{id:uid(),text:"新しい項目"}]);
+  return(
+    <div className="sc-fade" style={{paddingTop:10}}>
+      <div style={{background:t.card,borderRadius:16,padding:16,border:`1px solid ${t.line}`,marginBottom:16,boxShadow:t.shadow}}>
+        <label style={lbl(t)}>店舗名</label>
+        <input value={name} onChange={e=>setName(e.target.value)} onBlur={()=>{saveConfig({...config,storeName:name});flash("店舗名を保存しました");}} style={inp(t)}/>
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:14,background:t.line,padding:5,borderRadius:14}}>
+        {["open","close"].map(m=>(<button key={m} onClick={()=>setTab(m)} style={{flex:1,border:"none",cursor:"pointer",padding:"10px 0",borderRadius:10,fontFamily:"'Zen Maru Gothic',sans-serif",fontWeight:700,background:tab===m?t.card:"transparent",color:tab===m?t.ink:t.sub}}>{THEMES[m].icon} {THEMES[m].name}の項目</button>))}
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {list.map((it,i)=>(<div key={it.id} style={{display:"flex",alignItems:"center",gap:8,background:t.card,borderRadius:12,padding:10,border:`1px solid ${t.line}`}}>
+          <div style={{display:"flex",flexDirection:"column"}}>
+            <button onClick={()=>move(i,-1)} style={arrowBtn(t)}>▲</button>
+            <button onClick={()=>move(i,1)} style={arrowBtn(t)}>▼</button>
+          </div>
+          <input value={it.text} onChange={e=>editText(it.id,e.target.value)} style={{...inp(t),flex:1,padding:"10px 12px",marginTop:0}}/>
+          <button onClick={()=>remove(it.id)} style={{border:"none",background:"transparent",color:t.sub,cursor:"pointer",fontSize:20,padding:4}}>✕</button>
+        </div>))}
+      </div>
+      <button onClick={add} style={{marginTop:12,width:"100%",border:`2px dashed ${t.line}`,cursor:"pointer",background:"transparent",color:t.accent,padding:"14px 0",borderRadius:14,fontFamily:"'Zen Maru Gothic',sans-serif",fontWeight:700,fontSize:15}}>＋ 項目を追加</button>
+      <div style={{marginTop:14,fontSize:12,color:t.sub,fontFamily:"'Zen Maru Gothic',sans-serif",textAlign:"center"}}>変更は自動で保存され、全員の画面に反映されます</div>
+    </div>
+  );
+}
+
+function SetupScreen(){
+  const t=THEMES.close;
+  return(
+    <div style={{...wrap,background:t.bg,color:t.ink,padding:"32px 24px",justifyContent:"center"}}>
+      <style>{FONT_CSS}</style>
+      <div style={{fontFamily:"'Zen Maru Gothic',sans-serif"}}>
+        <div style={{fontSize:26,fontWeight:900,marginBottom:16}}>⚙ あと1ステップ</div>
+        <p style={{lineHeight:1.8,color:t.sub,fontSize:15}}>このファイルの上部にある <code style={{background:t.card,padding:"2px 6px",borderRadius:6}}>FIREBASE_CONFIG</code> に、Firebaseコンソールの設定を貼り付けると起動します。</p>
+        <p style={{lineHeight:1.8,color:t.sub,fontSize:15,marginTop:14}}>Firebase → プロジェクト設定 → マイアプリ（&lt;/&gt;）→ 構成 をコピーしてください。</p>
+      </div>
+    </div>
+  );
+}
+
+const wrap={display:"flex",flexDirection:"column",width:"100%",maxWidth:480,margin:"0 auto",minHeight:"100%",height:"100dvh",position:"relative",overflow:"hidden",fontFamily:"'Zen Maru Gothic',sans-serif"};
+const lbl=(t)=>({display:"block",fontSize:12,fontWeight:700,color:t.sub,marginBottom:6,fontFamily:"'Zen Maru Gothic',sans-serif"});
+const inp=(t)=>({width:"100%",border:`1px solid ${t.line}`,background:"transparent",color:t.ink,borderRadius:10,padding:"12px 14px",fontSize:15,outline:"none"});
+const arrowBtn=(t)=>({border:"none",background:"transparent",color:t.sub,cursor:"pointer",fontSize:9,lineHeight:1,padding:"2px 4px"});
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
